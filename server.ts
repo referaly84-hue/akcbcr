@@ -8236,6 +8236,37 @@ function getGeminiKeysWithMeta() {
   }
   return out;
 }
+function getKeyId(key: string): string {
+  return crypto2.createHash("sha256").update(String(key || "")).digest("hex").slice(0, 12);
+}
+function getDisabledModelsMap(): Record<string, string[]> {
+  const raw = db?.settings?.disabledKeyModels;
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+}
+function isKeyModelDisabled(key: string, model: string): boolean {
+  const map = getDisabledModelsMap();
+  const list = map[getKeyId(key)];
+  if (!Array.isArray(list) || !list.length) return false;
+  const target = resolveGeminiModel(model);
+  return list.some((m) => resolveGeminiModel(m) === target);
+}
+function setKeyModelEnabled(keyId: string, model: string, enabled: boolean) {
+  if (!db.settings) db.settings = {};
+  if (!db.settings.disabledKeyModels || typeof db.settings.disabledKeyModels !== "object" || Array.isArray(db.settings.disabledKeyModels)) {
+    db.settings.disabledKeyModels = {};
+  }
+  const map: Record<string, string[]> = db.settings.disabledKeyModels;
+  const modelsToUpdate = model === "*" ? getGeminiModelChain() : [resolveGeminiModel(model)];
+  const cur = new Set((Array.isArray(map[keyId]) ? map[keyId] : []).map((m) => resolveGeminiModel(m)));
+  for (const m of modelsToUpdate) {
+    if (!m) continue;
+    if (enabled) cur.delete(m);
+    else cur.add(m);
+  }
+  if (cur.size) map[keyId] = [...cur];
+  else delete map[keyId];
+  save();
+}
 function getGeminiKeys() {
   return getGeminiKeysWithMeta().map((x) => x.key);
 }
@@ -8755,6 +8786,7 @@ async function llm(sys, user, { json = true, task = "", temp = 0.9, max = 16e3, 
     const mLim = getModelQuotaLimits(tierModel, limitsCfg);
     for (const p of gProvs) {
       if (isKeyBlocked(p.key, now)) continue;
+      if (isKeyModelDisabled(p.key, tierModel)) continue;
       if (isModelBlocked(p.key, tierModel, now)) {
         const mc = modelCooldown.get(`${p.key}|${tierModel}`);
         if (mc && !mc.daily && mc.status !== 404) {
@@ -8801,6 +8833,7 @@ async function llm(sys, user, { json = true, task = "", temp = 0.9, max = 16e3, 
       for (const p of gProvs) {
         const kc = keyCooldown.get(p.key);
         if (kc?.authInvalid) continue;
+        if (isKeyModelDisabled(p.key, tierModel)) continue;
         attempts.push({ p, model: tierModel, grounded: !!grounded, fallbackCooled: true });
       }
     }
@@ -8809,6 +8842,9 @@ async function llm(sys, user, { json = true, task = "", temp = 0.9, max = 16e3, 
   let last;
   for (const att of attempts) {
     const p = att.p;
+    if (p.n === "gemini" && isKeyModelDisabled(p.key, att.model)) {
+      continue;
+    }
     if (!att.fallbackCooled && p.n === "gemini" && (isKeyBlocked(p.key) || isModelBlocked(p.key, att.model))) {
       continue;
     }
@@ -17621,8 +17657,11 @@ function buildAdminAiStatusPayload() {
   const modelAgg: Record<string, any> = {};
   for (const m of modelChain) {
     const mLim = getModelQuotaLimits(m, limitsCfg);
-    modelAgg[m] = { model: m, role: m === modelChain[0] ? "primary" : "secondary", rpmLimit: mLim.rpmLimit, tpmLimit: mLim.tpmLimit, rpdLimit: mLim.rpdLimit, requestsToday: 0, okToday: 0, errorsToday: 0, rateLimitsToday: 0, tokensToday: 0, rpmNow: 0, tpmNow: 0, latencySum: 0, latencyCount: 0, activeKeys: 0, coolingKeys: 0 };
+    modelAgg[m] = { model: m, role: m === modelChain[0] ? "primary" : "secondary", rpmLimit: mLim.rpmLimit, tpmLimit: mLim.tpmLimit, rpdLimit: mLim.rpdLimit, requestsToday: 0, okToday: 0, errorsToday: 0, rateLimitsToday: 0, tokensToday: 0, rpmNow: 0, tpmNow: 0, latencySum: 0, latencyCount: 0, activeKeys: 0, coolingKeys: 0, disabledKeys: 0, enabledKeys: 0 };
   }
+
+  let totalKeyRpmLimit = 0;
+  let totalKeyRpdLimit = 0;
 
   const keysOut = keysMeta.map((km, idx) => {
     const st = ensureKeyStat(km.key);
@@ -17638,6 +17677,7 @@ function buildAdminAiStatusPayload() {
 
     const byModelOut = modelChain.map((mName) => {
       const mLim = getModelQuotaLimits(mName, limitsCfg);
+      const disabledByUser = isKeyModelDisabled(km.key, mName);
       const ms = ensureModelStat(st, mName);
       pruneWindow(ms.rpmTimestamps, now);
       pruneWindow(ms.tpmEvents, now);
@@ -17650,7 +17690,9 @@ function buildAdminAiStatusPayload() {
 
       let mStatus = "ready";
       let mCoolSec = 0;
-      if (keyBlocked && kc?.authInvalid) {
+      if (disabledByUser) {
+        mStatus = "disabled";
+      } else if (keyBlocked && kc?.authInvalid) {
         mStatus = "auth_error";
         mCoolSec = Math.ceil((kcUntil - now) / 1000);
       } else if (mBlocked) {
@@ -17672,13 +17714,19 @@ function buildAdminAiStatusPayload() {
         agg.tpmNow += mTpm;
         agg.latencySum += ms.totalLatencyMs;
         agg.latencyCount += ms.latencySamples;
-        if (mStatus === "ready") agg.activeKeys++;
-        else agg.coolingKeys++;
+        if (disabledByUser) {
+          agg.disabledKeys++;
+        } else {
+          agg.enabledKeys++;
+          if (mStatus === "ready") agg.activeKeys++;
+          else agg.coolingKeys++;
+        }
       }
 
       return {
         model: mName,
         role: mName === modelChain[0] ? "primary" : "secondary",
+        enabled: !disabledByUser,
         rpmLimit: mLim.rpmLimit,
         tpmLimit: mLim.tpmLimit,
         rpdLimit: mLim.rpdLimit,
@@ -17698,24 +17746,41 @@ function buildAdminAiStatusPayload() {
       };
     });
 
+    const enabledModels = byModelOut.filter((m) => m.enabled);
+    const disabledCount = byModelOut.length - enabledModels.length;
+
     let status = "ready";
     let cooldownRemainingSec = 0;
     if (keyBlocked && kc?.authInvalid) {
       status = "auth_error";
       cooldownRemainingSec = Math.ceil((kcUntil - now) / 1000);
       invalidKeys++;
-    } else if (byModelOut.every((m) => m.status !== "ready")) {
-      const anyDaily = byModelOut.some((m) => m.status === "daily_limit") || !!kc?.daily;
+    } else if (!enabledModels.length) {
+      status = "disabled";
+      coolingKeys++;
+    } else if (enabledModels.every((m) => m.status !== "ready")) {
+      const anyDaily = enabledModels.some((m) => m.status === "daily_limit") || !!kc?.daily;
       status = anyDaily ? "daily_limit" : "cooling";
-      cooldownRemainingSec = Math.min(...byModelOut.map((m) => m.cooldownRemainingSec || 0).filter((x) => x > 0), 999999);
+      cooldownRemainingSec = Math.min(...enabledModels.map((m) => m.cooldownRemainingSec || 0).filter((x) => x > 0), 999999);
       if (cooldownRemainingSec === 999999) cooldownRemainingSec = 0;
       coolingKeys++;
-    } else if (byModelOut.some((m) => m.status !== "ready")) {
+    } else if (enabledModels.some((m) => m.status !== "ready") || disabledCount > 0) {
       status = "partial";
       readyKeys++;
     } else {
       readyKeys++;
     }
+
+    const keyRpmLimit = limitsCfg.tier === "free"
+      ? enabledModels.reduce((acc, m) => acc + (m.rpmLimit || 0), 0)
+      : (enabledModels.length ? limitsCfg.rpmLimit : 0);
+    const keyTpmLimit = enabledModels.length ? chainTpmLimit : 0;
+    const keyRpdLimit = limitsCfg.tier === "free"
+      ? enabledModels.reduce((acc, m) => acc + (m.rpdLimit || 0), 0)
+      : (enabledModels.length ? limitsCfg.rpdLimit : 0);
+
+    totalKeyRpmLimit += keyRpmLimit;
+    totalKeyRpdLimit += keyRpdLimit;
 
     totalRpmNow += rpmNow;
     totalTpmNow += tpmNow;
@@ -17733,6 +17798,7 @@ function buildAdminAiStatusPayload() {
       tail: km.tail,
       source: km.source,
       status,
+      disabledCount,
       cooldownRemainingSec,
       rpmNow,
       tpmNow,
@@ -17744,12 +17810,12 @@ function buildAdminAiStatusPayload() {
       outputTokensToday: st.todayOutputTokens,
       thoughtTokensToday: st.todayThoughtTokens,
       tokensToday: st.todayTotalTokens,
-      rpmLimit: chainRpmLimit,
-      tpmLimit: chainTpmLimit,
-      rpdLimit: chainRpdLimit,
-      rpmPct: Math.min(100, Math.round((rpmNow / chainRpmLimit) * 100)),
-      tpmPct: Math.min(100, Math.round((tpmNow / chainTpmLimit) * 100)),
-      rpdPct: Math.min(100, Math.round((st.todayRequests / chainRpdLimit) * 100)),
+      rpmLimit: keyRpmLimit,
+      tpmLimit: keyTpmLimit,
+      rpdLimit: keyRpdLimit,
+      rpmPct: keyRpmLimit ? Math.min(100, Math.round((rpmNow / keyRpmLimit) * 100)) : 0,
+      tpmPct: keyTpmLimit ? Math.min(100, Math.round((tpmNow / keyTpmLimit) * 100)) : 0,
+      rpdPct: keyRpdLimit ? Math.min(100, Math.round((st.todayRequests / keyRpdLimit) * 100)) : 0,
       avgMs: st.latencySamples ? Math.round(st.totalLatencyMs / st.latencySamples) : 0,
       lastUsedAt: st.lastUsedAt,
       lastOkAt: st.lastOkAt,
@@ -17768,9 +17834,9 @@ function buildAdminAiStatusPayload() {
       rpmLimit: a.rpmLimit,
       tpmLimit: a.tpmLimit,
       rpdLimit: a.rpdLimit,
-      totalRpmLimit: keysOut.length * a.rpmLimit,
-      totalTpmLimit: keysOut.length * a.tpmLimit,
-      totalRpdLimit: keysOut.length * a.rpdLimit,
+      totalRpmLimit: a.enabledKeys * a.rpmLimit,
+      totalTpmLimit: a.enabledKeys * a.tpmLimit,
+      totalRpdLimit: a.enabledKeys * a.rpdLimit,
       requestsToday: a.requestsToday,
       okToday: a.okToday,
       errorsToday: a.errorsToday,
@@ -17781,7 +17847,8 @@ function buildAdminAiStatusPayload() {
       avgMs: a.latencyCount ? Math.round(a.latencySum / a.latencyCount) : 0,
       successRate: a.requestsToday ? Math.round((a.okToday / a.requestsToday) * 100) : 100,
       activeKeys: a.activeKeys,
-      coolingKeys: a.coolingKeys
+      coolingKeys: a.coolingKeys,
+      disabledKeys: a.disabledKeys
     };
   });
 
@@ -17813,9 +17880,9 @@ function buildAdminAiStatusPayload() {
       readyKeys,
       coolingKeys,
       invalidKeys,
-      totalRpmLimit: keysOut.length * chainRpmLimit,
+      totalRpmLimit: totalKeyRpmLimit,
       totalTpmLimit: keysOut.length * chainTpmLimit,
-      totalRpdLimit: keysOut.length * chainRpdLimit,
+      totalRpdLimit: totalKeyRpdLimit,
       rpmNow: totalRpmNow,
       tpmNow: totalTpmNow,
       rpdToday: totalRpdToday,
@@ -17883,6 +17950,20 @@ app.post("/api/admin/ai/reset-cooldowns", admin, (req, res) => {
       }
     }
   }
+  res.json(buildAdminAiStatusPayload());
+});
+app.post("/api/admin/ai/key-model-toggle", admin, (req, res) => {
+  const keyId = String(req.body?.keyId || "").trim();
+  const rawModel = String(req.body?.model || "").trim();
+  const enabled = !!req.body?.enabled;
+  if (!keyId || !rawModel) {
+    return fail(res, "Укажите ключ и модель");
+  }
+  const match = getGeminiKeysWithMeta().find((k) => k.keyId === keyId);
+  if (!match) {
+    return fail(res, "Ключ Gemini не найден");
+  }
+  setKeyModelEnabled(keyId, rawModel, enabled);
   res.json(buildAdminAiStatusPayload());
 });
 app.post("/api/admin/ai/test-key", admin, async (req, res) => {
