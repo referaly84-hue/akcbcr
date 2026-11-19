@@ -30,7 +30,8 @@ import crypto2 from "crypto";
 import path from "path";
 import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 const DEFAULT_GEMINI_PRIMARY_MODEL = "gemini-3.6-flash";
-const DEFAULT_GEMINI_SECONDARY_MODELS = [
+const GEMINI_PRESET_MODELS = [
+  "gemini-3.6-flash",
   "gemini-3.5-flash",
   "gemini-3.5-flash-lite",
   "gemini-3.1-flash-lite"
@@ -59,23 +60,6 @@ function resolveGeminiModel(rawModel) {
   }
   if (/^gemini-(?:1\.|2\.0|3\.1-flash$|3\.8(?:-flash)?$)|^gemini-pro$/i.test(m)) return DEFAULT_GEMINI_PRIMARY_MODEL;
   return m;
-}
-function parseGeminiSecondaryModels(rawVal) {
-  const arr = Array.isArray(rawVal)
-    ? rawVal
-    : typeof rawVal === "string" && rawVal.trim()
-      ? rawVal.split(/[\n,;]+/)
-      : [];
-  const out = [];
-  const seen = new Set();
-  for (const item of arr) {
-    const clean = resolveGeminiModel(String(item || "").trim());
-    if (clean && !seen.has(clean)) {
-      seen.add(clean);
-      out.push(clean);
-    }
-  }
-  return out.length ? out : [...DEFAULT_GEMINI_SECONDARY_MODELS];
 }
 function readServiceAccount() {
   try {
@@ -4849,8 +4833,17 @@ var PROXY_ROUTES = [
   ["https://openrouter.ai", "/openrouter"],
   ["https://api.telegram.org", "/telegram"]
 ];
+function normalizeWorkerUrl(rawUrl) {
+  try {
+    let u = String(rawUrl || "").trim().replace(/\/+$/, "");
+    u = u.replace(/\/+(?:gemini|groq|openrouter|telegram)$/i, "").replace(/\/+$/, "");
+    return u;
+  } catch {
+    return "";
+  }
+}
 function workerBase() {
-  try { return String(HARDCODED.workerUrl || "").trim().replace(/\/+$/, ""); } catch { return ""; }
+  return normalizeWorkerUrl(HARDCODED.workerUrl);
 }
 globalThis.fetch = (async (input, init) => {
   const base = workerBase();
@@ -4931,7 +4924,6 @@ function syncSecretsFromDisk(force = false) {
     lastSecretsMtimeMs = st.mtimeMs;
     const sec = readSecretsFile();
     if (typeof keyCooldown !== "undefined" && keyCooldown) keyCooldown.clear();
-    if (typeof modelCooldown !== "undefined" && modelCooldown) modelCooldown.clear();
     if (!db || !db.settings) return true;
     let changed = false;
     if (!db.settings.keys) db.settings.keys = {};
@@ -4965,11 +4957,6 @@ var HARDCODED = {
   get groqKey() { return this.groqKeys[0] || ""; },
   get openrouterKey() { return this.openrouterKeys[0] || ""; },
   get geminiModel() { return resolveGeminiModel(readSecretsFile().geminiModel || process.env.GEMINI_MODEL || DEFAULT_GEMINI_PRIMARY_MODEL); },
-  get geminiSecondaryModels() {
-    const sec = readSecretsFile();
-    const raw = sec.geminiSecondaryModels !== undefined ? sec.geminiSecondaryModels : process.env.GEMINI_SECONDARY_MODELS;
-    return raw !== undefined && raw !== "" ? parseGeminiSecondaryModels(raw) : [...DEFAULT_GEMINI_SECONDARY_MODELS];
-  },
   get groqModel() { return String(readSecretsFile().groqModel || process.env.GROQ_MODEL || "openai/gpt-oss-120b").trim(); },
   get openrouterModel() { return String(readSecretsFile().openrouterModel || process.env.OPENROUTER_MODEL || "openrouter/free").trim(); },
   get tgToken() { const t = String(readSecretsFile().tgToken || "").trim(); return t.includes("\u2022") ? "" : t; },
@@ -4981,7 +4968,6 @@ var HARDCODED = {
 var HARDCODED_LEGACY = {
   geminiKeys: [],
   geminiModel: DEFAULT_GEMINI_PRIMARY_MODEL,
-  geminiSecondaryModels: [...DEFAULT_GEMINI_SECONDARY_MODELS],
   groqKey: "",
   openrouterKey: "",
   tgToken: "",
@@ -8239,52 +8225,12 @@ function getGeminiKeysWithMeta() {
 function getKeyId(key: string): string {
   return crypto2.createHash("sha256").update(String(key || "")).digest("hex").slice(0, 12);
 }
-function getDisabledModelsMap(): Record<string, string[]> {
-  const raw = db?.settings?.disabledKeyModels;
-  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-}
-function isKeyModelDisabled(key: string, model: string): boolean {
-  const map = getDisabledModelsMap();
-  const list = map[getKeyId(key)];
-  if (!Array.isArray(list) || !list.length) return false;
-  const target = resolveGeminiModel(model);
-  return list.some((m) => resolveGeminiModel(m) === target);
-}
-function setKeyModelEnabled(keyId: string, model: string, enabled: boolean) {
-  if (!db.settings) db.settings = {};
-  if (!db.settings.disabledKeyModels || typeof db.settings.disabledKeyModels !== "object" || Array.isArray(db.settings.disabledKeyModels)) {
-    db.settings.disabledKeyModels = {};
-  }
-  const map: Record<string, string[]> = db.settings.disabledKeyModels;
-  const modelsToUpdate = model === "*" ? getGeminiModelChain() : [resolveGeminiModel(model)];
-  const cur = new Set((Array.isArray(map[keyId]) ? map[keyId] : []).map((m) => resolveGeminiModel(m)));
-  for (const m of modelsToUpdate) {
-    if (!m) continue;
-    if (enabled) cur.delete(m);
-    else cur.add(m);
-  }
-  if (cur.size) map[keyId] = [...cur];
-  else delete map[keyId];
-  save();
-}
 function getGeminiKeys() {
   return getGeminiKeysWithMeta().map((x) => x.key);
 }
-function getGeminiModelChain() {
+function getGeminiModel() {
   syncSecretsFromDisk();
-  const primary = resolveGeminiModel(HARDCODED.geminiModel || DEFAULT_GEMINI_PRIMARY_MODEL);
-  const secondary = Array.isArray(HARDCODED.geminiSecondaryModels)
-    ? HARDCODED.geminiSecondaryModels.map((m) => resolveGeminiModel(m))
-    : [...DEFAULT_GEMINI_SECONDARY_MODELS];
-  const out = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const m of [primary, ...secondary]) {
-    if (m && !seen.has(m)) {
-      seen.add(m);
-      out.push(m);
-    }
-  }
-  return out.length ? out : [DEFAULT_GEMINI_PRIMARY_MODEL, ...DEFAULT_GEMINI_SECONDARY_MODELS];
+  return resolveGeminiModel(HARDCODED.geminiModel || DEFAULT_GEMINI_PRIMARY_MODEL);
 }
 var aiCtx = new AsyncLocalStorage();
 var aiAllowed = () => !!aiCtx.getStore()?.ai;
@@ -8294,7 +8240,7 @@ function provList() {
   const gKeys = getGeminiKeys();
   const qKeys = secList(HARDCODED.groqKeys, process.env.GROQ_API_KEY);
   const oKeys = secList(HARDCODED.openrouterKeys, process.env.OPENROUTER_API_KEY);
-  const gModel = getGeminiModelChain()[0] || DEFAULT_GEMINI_PRIMARY_MODEL;
+  const gModel = getGeminiModel();
   for (let i = 0; i < gKeys.length; i++) {
     L.push({ n: "gemini", id: `gemini_proj_${i + 1}`, key: gKeys[i], model: gModel, max: 32e3 });
   }
@@ -8338,32 +8284,6 @@ function parseGeminiErrorDetails(err: any) {
   return { msg, status, retryAfterMs, daily, authInvalid };
 }
 var aiKeyStats = /* @__PURE__ */ new Map();
-function getAiLimitsConfig() {
-  const raw = db?.settings?.aiLimits && typeof db.settings.aiLimits === "object" ? db.settings.aiLimits : {};
-  const tier = raw.tier === "paid_tier1" || raw.tier === "custom" ? raw.tier : "free";
-  const defaultRpm = tier === "paid_tier1" ? 1000 : 5;
-  const defaultTpm = tier === "paid_tier1" ? 4000000 : 250000;
-  const defaultRpd = tier === "paid_tier1" ? 10000 : 20;
-  return {
-    tier,
-    rpmLimit: Math.max(1, Number(raw.rpmLimit) || defaultRpm),
-    tpmLimit: Math.max(1000, Number(raw.tpmLimit) || defaultTpm),
-    rpdLimit: Math.max(1, Number(raw.rpdLimit) || defaultRpd),
-    liteRpmLimit: tier === "free" ? 15 : Math.max(1, Number(raw.rpmLimit) || defaultRpm),
-    liteTpmLimit: tier === "free" ? 250000 : Math.max(1000, Number(raw.tpmLimit) || defaultTpm),
-    liteRpdLimit: tier === "free" ? 500 : Math.max(1, Number(raw.rpdLimit) || defaultRpd)
-  };
-}
-function getModelQuotaLimits(model: string, limitsCfg = getAiLimitsConfig()) {
-  if (limitsCfg.tier === "free" && /flash-lite/i.test(String(model || ""))) {
-    return { rpmLimit: 15, tpmLimit: 250000, rpdLimit: 500 };
-  }
-  return {
-    rpmLimit: limitsCfg.rpmLimit,
-    tpmLimit: limitsCfg.tpmLimit,
-    rpdLimit: limitsCfg.rpdLimit
-  };
-}
 function aiTodayStr() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -8717,27 +8637,18 @@ function recordAiHistory(entry) {
   pgSaveAiHistoryItem(item, 50);
 }
 var keyCooldown = /* @__PURE__ */ new Map();
-var modelCooldown = /* @__PURE__ */ new Map();
 var geminiRoundRobinIndex = 0;
 var coolKey = (p, e) => {
   const ms = e.authInvalid || e.status === 401 || e.status === 403
     ? 10 * 6e4
     : e.daily
       ? 30 * 6e4
-      : e.retryAfterMs || 9e4;
-  keyCooldown.set(p.key, { until: Date.now() + ms, status: e.status || 0, daily: !!e.daily, authInvalid: !!e.authInvalid, reason: String(e.message || "").slice(0, 160) });
-};
-var coolModel = (p, model, e) => {
-  const ms = e.status === 404
-    ? 30 * 6e4
-    : e.daily
-      ? 15 * 6e4
       : e.status === 429
         ? (e.retryAfterMs || 65e3)
         : e.status >= 500 || e.name === "AbortError"
           ? 2e4
           : 45e3;
-  modelCooldown.set(`${p.key}|${model}`, { until: Date.now() + ms, status: e.status || 0, daily: !!e.daily, reason: String(e.message || "").slice(0, 160) });
+  keyCooldown.set(p.key, { until: Date.now() + ms, status: e.status || 0, daily: !!e.daily, authInvalid: !!e.authInvalid, reason: String(e.message || "").slice(0, 160) });
 };
 function getCooldownUntil(entry: any): number {
   if (!entry) return 0;
@@ -8750,15 +8661,6 @@ function isKeyBlocked(key: string, now = Date.now()): boolean {
   if (entry) keyCooldown.delete(key);
   return false;
 }
-function isModelBlocked(key: string, model: string, now = Date.now()): boolean {
-  const k = `${key}|${model}`;
-  const entry = modelCooldown.get(k);
-  const until = getCooldownUntil(entry);
-  if (until > now) return true;
-  if (entry) modelCooldown.delete(k);
-  return false;
-}
-var GEMINI_MODEL_CHAIN = [DEFAULT_GEMINI_PRIMARY_MODEL, ...DEFAULT_GEMINI_SECONDARY_MODELS];
 async function llm(sys, user, { json = true, task = "", temp = 0.9, max = 16e3, grounded = false } = {}) {
   const cx = aiCtx.getStore();
   if (!cx?.ai) throw Object.assign(new Error("\u0418\u0418 \u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D \u0442\u043E\u043B\u044C\u043A\u043E \u0430\u0434\u043C\u0438\u043D\u0438\u0441\u0442\u0440\u0430\u0442\u043E\u0440\u0443"), { noLLM: true });
@@ -8767,7 +8669,7 @@ async function llm(sys, user, { json = true, task = "", temp = 0.9, max = 16e3, 
   if (cx.cap && cx.calls >= cx.cap) throw Object.assign(new Error(`\u043B\u0438\u043C\u0438\u0442 \u0418\u0418-\u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432 \u043D\u0430 \u043C\u0430\u0442\u0447 (${cx.cap}) \u0438\u0441\u0447\u0435\u0440\u043F\u0430\u043D`), { capped: true });
   cx.calls++;
 
-  const modelChain = getGeminiModelChain();
+  const activeGeminiModel = getGeminiModel();
   const geminiProvsRaw = all.filter((p) => p.n === "gemini");
   const otherProvs = all.filter((p) => p.n !== "gemini");
   let gProvs = geminiProvsRaw;
@@ -8777,48 +8679,22 @@ async function llm(sys, user, { json = true, task = "", temp = 0.9, max = 16e3, 
   }
 
   const now = Date.now();
-  const limitsCfg = getAiLimitsConfig();
   const attempts: Array<{ p: any; model: string; grounded: boolean; fallbackCooled?: boolean }> = [];
-  const softThrottledFallback: Array<{ p: any; model: string; grounded: boolean; dailyHit: boolean }> = [];
   const cooledFallback: Array<{ p: any; model: string; grounded: boolean; until: number }> = [];
 
-  for (const tierModel of modelChain) {
-    const mLim = getModelQuotaLimits(tierModel, limitsCfg);
-    for (const p of gProvs) {
-      if (isKeyBlocked(p.key, now)) continue;
-      if (isKeyModelDisabled(p.key, tierModel)) continue;
-      if (isModelBlocked(p.key, tierModel, now)) {
-        const mc = modelCooldown.get(`${p.key}|${tierModel}`);
-        if (mc && !mc.daily && mc.status !== 404) {
-          cooledFallback.push({ p, model: tierModel, grounded: !!grounded, until: getCooldownUntil(mc) });
-        }
-        continue;
+  for (const p of gProvs) {
+    if (isKeyBlocked(p.key, now)) {
+      const kc = keyCooldown.get(p.key);
+      if (kc && !kc.authInvalid && !kc.daily) {
+        cooledFallback.push({ p, model: activeGeminiModel, grounded: !!grounded, until: getCooldownUntil(kc) });
       }
-      if (limitsCfg.tier === "free") {
-        const st = ensureKeyStat(p.key);
-        const ms = ensureModelStat(st, tierModel);
-        pruneWindow(ms.rpmTimestamps, now);
-        pruneWindow(ms.tpmEvents, now);
-        const mRpm = ms.rpmTimestamps.length;
-        const mTpm = ms.tpmEvents.reduce((acc: number, ev: any) => acc + (ev.tokens || 0), 0);
-        const dailyHit = ms.todayOk >= mLim.rpdLimit;
-        if (dailyHit || mRpm >= mLim.rpmLimit || mTpm >= mLim.tpmLimit) {
-          softThrottledFallback.push({ p, model: tierModel, grounded: !!grounded, dailyHit });
-          continue;
-        }
-      }
-      attempts.push({ p, model: tierModel, grounded: !!grounded });
+      continue;
     }
+    attempts.push({ p, model: activeGeminiModel, grounded: !!grounded });
   }
   for (const p of otherProvs) {
     if (!isKeyBlocked(p.key, now)) {
       attempts.push({ p, model: p.model, grounded: false });
-    }
-  }
-  if (!attempts.length && softThrottledFallback.length) {
-    softThrottledFallback.sort((a, b) => Number(a.dailyHit) - Number(b.dailyHit));
-    for (const sf of softThrottledFallback) {
-      attempts.push({ p: sf.p, model: sf.model, grounded: sf.grounded, fallbackCooled: true });
     }
   }
   if (!attempts.length && cooledFallback.length) {
@@ -8828,24 +8704,17 @@ async function llm(sys, user, { json = true, task = "", temp = 0.9, max = 16e3, 
     }
   }
   if (!attempts.length) {
-    // All keys are auth-invalid or exhausted
-    for (const tierModel of modelChain) {
-      for (const p of gProvs) {
-        const kc = keyCooldown.get(p.key);
-        if (kc?.authInvalid) continue;
-        if (isKeyModelDisabled(p.key, tierModel)) continue;
-        attempts.push({ p, model: tierModel, grounded: !!grounded, fallbackCooled: true });
-      }
+    for (const p of gProvs) {
+      const kc = keyCooldown.get(p.key);
+      if (kc?.authInvalid) continue;
+      attempts.push({ p, model: activeGeminiModel, grounded: !!grounded, fallbackCooled: true });
     }
   }
 
   let last;
   for (const att of attempts) {
     const p = att.p;
-    if (p.n === "gemini" && isKeyModelDisabled(p.key, att.model)) {
-      continue;
-    }
-    if (!att.fallbackCooled && p.n === "gemini" && (isKeyBlocked(p.key) || isModelBlocked(p.key, att.model))) {
+    if (!att.fallbackCooled && isKeyBlocked(p.key)) {
       continue;
     }
     const provRun = p.n === "gemini" ? { ...p, model: att.model } : p;
@@ -8869,7 +8738,6 @@ async function llm(sys, user, { json = true, task = "", temp = 0.9, max = 16e3, 
         const usage = callOpts._lastUsage || {};
         keyCooldown.delete(p.key);
         if (p.n === "gemini") {
-          modelCooldown.delete(`${p.key}|${att.model}`);
           recordAiKeyAttempt(p.key, att.model, { ok: true, ms: elapsed, usage });
         }
         llog({ task, p: provRun.id || provRun.n, model: provRun.model, ok: 1, ms: elapsed, tokens: usage.totalTokens || 0 });
@@ -8891,18 +8759,14 @@ async function llm(sys, user, { json = true, task = "", temp = 0.9, max = 16e3, 
 
     const e = res1.err;
     last = e;
-    // If grounded call failed due to tool/JSON formatting (not auth or rate limit), retry once without grounding on same key/model
     if (att.grounded && e.status !== 401 && e.status !== 403 && e.status !== 429 && e.status !== 404) {
       const res2 = await runAttempt(false);
       if (res2.ok) return res2.text;
       last = res2.err;
     }
 
-    if (last.authInvalid || last.status === 401 || last.status === 403) {
+    if (last.authInvalid || last.status === 401 || last.status === 403 || last.status === 429 || last.status === 404 || last.status >= 500 || last.name === "AbortError") {
       coolKey(p, last);
-    } else if (last.status === 429 || last.status === 404 || last.status >= 500 || last.name === "AbortError") {
-      if (p.n === "gemini") coolModel(p, att.model, last);
-      else coolKey(p, last);
     }
     await sleep(last.badJson ? 80 : 120);
   }
@@ -15550,8 +15414,8 @@ app.get("/api/admin/secrets", admin, (req, res) => {
     geminiFileCount: Array.isArray(sec.geminiKeys) ? sec.geminiKeys.length : (typeof sec.geminiKeys === "string" && sec.geminiKeys.trim() ? sec.geminiKeys.split(/[\n,;\s|]+/).filter(Boolean).length : 0),
     geminiEnvCount: envGemini.length,
     geminiModel: effectiveModel,
-    geminiSecondaryModels: HARDCODED.geminiSecondaryModels,
-    geminiModelChain: getGeminiModelChain(),
+    workerUrl: workerBase(),
+    hasWorkerSecret: !!HARDCODED.workerSecret,
     hasGroq: HARDCODED.groqKeys.length > 0 || !!process.env.GROQ_API_KEY,
     groqModel: HARDCODED.groqModel,
     hasOpenrouter: HARDCODED.openrouterKeys.length > 0 || !!process.env.OPENROUTER_API_KEY,
@@ -17560,9 +17424,7 @@ app.get("/api/admin/overview", admin, (req, res) => {
   const envGemini = getEnvGeminiKeys();
   const fileGeminiCount = Array.isArray(sec.geminiKeys) ? sec.geminiKeys.length : (typeof sec.geminiKeys === "string" && sec.geminiKeys.trim() ? sec.geminiKeys.split(/[\n,;\s|]+/).filter(Boolean).length : 0);
   const effModels = {
-    gemini: HARDCODED.geminiModel,
-    geminiSecondary: HARDCODED.geminiSecondaryModels,
-    geminiChain: getGeminiModelChain(),
+    gemini: getGeminiModel(),
     groq: HARDCODED.groqModel,
     openrouter: HARDCODED.openrouterModel
   };
@@ -17581,6 +17443,8 @@ app.get("/api/admin/overview", admin, (req, res) => {
       tgToken: tgToken() ? "\u2022\u2022\u2022\u2022" : "",
       hasTgToken: !!tgToken(),
       tgChat: tgChat(),
+      workerUrl: workerBase(),
+      hasWorkerSecret: !!HARDCODED.workerSecret,
       appBaseUrl: String(db.settings.siteUrl || process.env.APP_URL || "").trim().replace(/\/+$/, ""),
       adminCode: process.env.ADMIN_CODE || HARDCODED.adminCode || db.settings.adminCode,
       systemPrompt: db.settings.systemPrompt || SYS_DEFAULT,
@@ -17631,21 +17495,12 @@ function buildAdminAiStatusPayload() {
   syncSecretsFromDisk();
   const now = Date.now();
   const keysMeta = getGeminiKeysWithMeta();
-  const modelChain = getGeminiModelChain();
-  const limitsCfg = getAiLimitsConfig();
-  const chainRpmLimit = limitsCfg.tier === "free"
-    ? modelChain.reduce((acc, m) => acc + getModelQuotaLimits(m, limitsCfg).rpmLimit, 0)
-    : limitsCfg.rpmLimit;
-  const chainTpmLimit = limitsCfg.tpmLimit;
-  const chainRpdLimit = limitsCfg.tier === "free"
-    ? modelChain.reduce((acc, m) => acc + getModelQuotaLimits(m, limitsCfg).rpdLimit, 0)
-    : limitsCfg.rpdLimit;
+  const activeModel = getGeminiModel();
+  const proxyUrl = workerBase();
 
   let readyKeys = 0;
   let coolingKeys = 0;
   let invalidKeys = 0;
-  let totalRpmNow = 0;
-  let totalTpmNow = 0;
   let totalRpdToday = 0;
   let totalTokensToday = 0;
   let totalOkToday = 0;
@@ -17654,136 +17509,28 @@ function buildAdminAiStatusPayload() {
   let totalLatencySum = 0;
   let totalLatencyCount = 0;
 
-  const modelAgg: Record<string, any> = {};
-  for (const m of modelChain) {
-    const mLim = getModelQuotaLimits(m, limitsCfg);
-    modelAgg[m] = { model: m, role: m === modelChain[0] ? "primary" : "secondary", rpmLimit: mLim.rpmLimit, tpmLimit: mLim.tpmLimit, rpdLimit: mLim.rpdLimit, requestsToday: 0, okToday: 0, errorsToday: 0, rateLimitsToday: 0, tokensToday: 0, rpmNow: 0, tpmNow: 0, latencySum: 0, latencyCount: 0, activeKeys: 0, coolingKeys: 0, disabledKeys: 0, enabledKeys: 0 };
-  }
-
-  let totalKeyRpmLimit = 0;
-  let totalKeyRpdLimit = 0;
-
   const keysOut = keysMeta.map((km, idx) => {
     const st = ensureKeyStat(km.key);
-    pruneWindow(st.rpmTimestamps, now);
-    pruneWindow(st.tpmEvents, now);
-    const rpmNow = st.rpmTimestamps.length;
-    const tpmNow = st.tpmEvents.reduce((acc: number, ev: any) => acc + (ev.tokens || 0), 0);
-
     const kc = keyCooldown.get(km.key);
     const kcUntil = getCooldownUntil(kc);
     const keyBlocked = kcUntil > now;
     if (!keyBlocked && kc) keyCooldown.delete(km.key);
 
-    const byModelOut = modelChain.map((mName) => {
-      const mLim = getModelQuotaLimits(mName, limitsCfg);
-      const disabledByUser = isKeyModelDisabled(km.key, mName);
-      const ms = ensureModelStat(st, mName);
-      pruneWindow(ms.rpmTimestamps, now);
-      pruneWindow(ms.tpmEvents, now);
-      const mRpm = ms.rpmTimestamps.length;
-      const mTpm = ms.tpmEvents.reduce((acc: number, ev: any) => acc + (ev.tokens || 0), 0);
-      const mc = modelCooldown.get(`${km.key}|${mName}`);
-      const mcUntil = getCooldownUntil(mc);
-      const mBlocked = mcUntil > now;
-      if (!mBlocked && mc) modelCooldown.delete(`${km.key}|${mName}`);
-
-      let mStatus = "ready";
-      let mCoolSec = 0;
-      if (disabledByUser) {
-        mStatus = "disabled";
-      } else if (keyBlocked && kc?.authInvalid) {
-        mStatus = "auth_error";
-        mCoolSec = Math.ceil((kcUntil - now) / 1000);
-      } else if (mBlocked) {
-        mStatus = mc?.daily ? "daily_limit" : "cooling";
-        mCoolSec = Math.ceil((mcUntil - now) / 1000);
-      } else if (keyBlocked) {
-        mStatus = kc?.daily ? "daily_limit" : "cooling";
-        mCoolSec = Math.ceil((kcUntil - now) / 1000);
-      }
-
-      const agg = modelAgg[mName];
-      if (agg) {
-        agg.requestsToday += ms.todayRequests;
-        agg.okToday += ms.todayOk;
-        agg.errorsToday += ms.todayErrors;
-        agg.rateLimitsToday += ms.todayRateLimits;
-        agg.tokensToday += ms.todayTotalTokens;
-        agg.rpmNow += mRpm;
-        agg.tpmNow += mTpm;
-        agg.latencySum += ms.totalLatencyMs;
-        agg.latencyCount += ms.latencySamples;
-        if (disabledByUser) {
-          agg.disabledKeys++;
-        } else {
-          agg.enabledKeys++;
-          if (mStatus === "ready") agg.activeKeys++;
-          else agg.coolingKeys++;
-        }
-      }
-
-      return {
-        model: mName,
-        role: mName === modelChain[0] ? "primary" : "secondary",
-        enabled: !disabledByUser,
-        rpmLimit: mLim.rpmLimit,
-        tpmLimit: mLim.tpmLimit,
-        rpdLimit: mLim.rpdLimit,
-        status: mStatus,
-        cooldownRemainingSec: mCoolSec,
-        rpmNow: mRpm,
-        tpmNow: mTpm,
-        requestsToday: ms.todayRequests,
-        okToday: ms.todayOk,
-        errorsToday: ms.todayErrors,
-        rateLimitsToday: ms.todayRateLimits,
-        tokensToday: ms.todayTotalTokens,
-        avgMs: ms.latencySamples ? Math.round(ms.totalLatencyMs / ms.latencySamples) : 0,
-        lastUsedAt: ms.lastUsedAt,
-        lastError: ms.lastErrorMsg,
-        lastErrorStatus: ms.lastErrorStatus
-      };
-    });
-
-    const enabledModels = byModelOut.filter((m) => m.enabled);
-    const disabledCount = byModelOut.length - enabledModels.length;
-
     let status = "ready";
     let cooldownRemainingSec = 0;
-    if (keyBlocked && kc?.authInvalid) {
-      status = "auth_error";
+    if (keyBlocked) {
       cooldownRemainingSec = Math.ceil((kcUntil - now) / 1000);
-      invalidKeys++;
-    } else if (!enabledModels.length) {
-      status = "disabled";
-      coolingKeys++;
-    } else if (enabledModels.every((m) => m.status !== "ready")) {
-      const anyDaily = enabledModels.some((m) => m.status === "daily_limit") || !!kc?.daily;
-      status = anyDaily ? "daily_limit" : "cooling";
-      cooldownRemainingSec = Math.min(...enabledModels.map((m) => m.cooldownRemainingSec || 0).filter((x) => x > 0), 999999);
-      if (cooldownRemainingSec === 999999) cooldownRemainingSec = 0;
-      coolingKeys++;
-    } else if (enabledModels.some((m) => m.status !== "ready") || disabledCount > 0) {
-      status = "partial";
-      readyKeys++;
+      if (kc?.authInvalid) {
+        status = "auth_error";
+        invalidKeys++;
+      } else {
+        status = kc?.daily ? "daily_limit" : "cooling";
+        coolingKeys++;
+      }
     } else {
       readyKeys++;
     }
 
-    const keyRpmLimit = limitsCfg.tier === "free"
-      ? enabledModels.reduce((acc, m) => acc + (m.rpmLimit || 0), 0)
-      : (enabledModels.length ? limitsCfg.rpmLimit : 0);
-    const keyTpmLimit = enabledModels.length ? chainTpmLimit : 0;
-    const keyRpdLimit = limitsCfg.tier === "free"
-      ? enabledModels.reduce((acc, m) => acc + (m.rpdLimit || 0), 0)
-      : (enabledModels.length ? limitsCfg.rpdLimit : 0);
-
-    totalKeyRpmLimit += keyRpmLimit;
-    totalKeyRpdLimit += keyRpdLimit;
-
-    totalRpmNow += rpmNow;
-    totalTpmNow += tpmNow;
     totalRpdToday += st.todayRequests;
     totalTokensToday += st.todayTotalTokens;
     totalOkToday += st.todayOk;
@@ -17798,10 +17545,7 @@ function buildAdminAiStatusPayload() {
       tail: km.tail,
       source: km.source,
       status,
-      disabledCount,
       cooldownRemainingSec,
-      rpmNow,
-      tpmNow,
       rpdToday: st.todayRequests,
       okToday: st.todayOk,
       errorsToday: st.todayErrors,
@@ -17810,45 +17554,12 @@ function buildAdminAiStatusPayload() {
       outputTokensToday: st.todayOutputTokens,
       thoughtTokensToday: st.todayThoughtTokens,
       tokensToday: st.todayTotalTokens,
-      rpmLimit: keyRpmLimit,
-      tpmLimit: keyTpmLimit,
-      rpdLimit: keyRpdLimit,
-      rpmPct: keyRpmLimit ? Math.min(100, Math.round((rpmNow / keyRpmLimit) * 100)) : 0,
-      tpmPct: keyTpmLimit ? Math.min(100, Math.round((tpmNow / keyTpmLimit) * 100)) : 0,
-      rpdPct: keyRpdLimit ? Math.min(100, Math.round((st.todayRequests / keyRpdLimit) * 100)) : 0,
       avgMs: st.latencySamples ? Math.round(st.totalLatencyMs / st.latencySamples) : 0,
       lastUsedAt: st.lastUsedAt,
       lastOkAt: st.lastOkAt,
       lastErrorAt: st.lastErrorAt,
       lastError: st.lastErrorMsg,
-      lastErrorStatus: st.lastErrorStatus,
-      byModel: byModelOut
-    };
-  });
-
-  const modelStats = modelChain.map((m) => {
-    const a = modelAgg[m];
-    return {
-      model: a.model,
-      role: a.role,
-      rpmLimit: a.rpmLimit,
-      tpmLimit: a.tpmLimit,
-      rpdLimit: a.rpdLimit,
-      totalRpmLimit: a.enabledKeys * a.rpmLimit,
-      totalTpmLimit: a.enabledKeys * a.tpmLimit,
-      totalRpdLimit: a.enabledKeys * a.rpdLimit,
-      requestsToday: a.requestsToday,
-      okToday: a.okToday,
-      errorsToday: a.errorsToday,
-      rateLimitsToday: a.rateLimitsToday,
-      tokensToday: a.tokensToday,
-      rpmNow: a.rpmNow,
-      tpmNow: a.tpmNow,
-      avgMs: a.latencyCount ? Math.round(a.latencySum / a.latencyCount) : 0,
-      successRate: a.requestsToday ? Math.round((a.okToday / a.requestsToday) * 100) : 100,
-      activeKeys: a.activeKeys,
-      coolingKeys: a.coolingKeys,
-      disabledKeys: a.disabledKeys
+      lastErrorStatus: st.lastErrorStatus
     };
   });
 
@@ -17856,17 +17567,17 @@ function buildAdminAiStatusPayload() {
     ok: 1,
     today: aiTodayStr(),
     models: {
-      primary: modelChain[0] || DEFAULT_GEMINI_PRIMARY_MODEL,
-      secondary: modelChain.slice(1),
-      chain: modelChain,
+      primary: activeModel,
+      presets: GEMINI_PRESET_MODELS,
       groq: HARDCODED.groqKeys.length || process.env.GROQ_API_KEY ? HARDCODED.groqModel : "",
       openrouter: HARDCODED.openrouterKeys.length || process.env.OPENROUTER_API_KEY ? HARDCODED.openrouterModel : ""
     },
-    limitsConfig: {
-      ...limitsCfg,
-      chainRpmLimit,
-      chainTpmLimit,
-      chainRpdLimit,
+    proxy: {
+      active: !!proxyUrl,
+      workerUrl: proxyUrl,
+      hasWorkerSecret: !!HARDCODED.workerSecret
+    },
+    appConfig: {
       maxAiCalls: Number(db.settings.maxAiCalls || 10),
       aiParallel: Number(db.settings.aiParallel || 2),
       aiLeadSec: Number(db.settings.aiLeadSec ?? 90),
@@ -17880,11 +17591,6 @@ function buildAdminAiStatusPayload() {
       readyKeys,
       coolingKeys,
       invalidKeys,
-      totalRpmLimit: totalKeyRpmLimit,
-      totalTpmLimit: keysOut.length * chainTpmLimit,
-      totalRpdLimit: totalKeyRpdLimit,
-      rpmNow: totalRpmNow,
-      tpmNow: totalTpmNow,
       rpdToday: totalRpdToday,
       tokensToday: totalTokensToday,
       okToday: totalOkToday,
@@ -17893,7 +17599,6 @@ function buildAdminAiStatusPayload() {
       avgMs: totalLatencyCount ? Math.round(totalLatencySum / totalLatencyCount) : 0,
       successRate: totalRpdToday ? Math.round((totalOkToday / totalRpdToday) * 100) : 100
     },
-    modelStats,
     keys: keysOut,
     recentLog: (db.llmlog || []).slice(-30).reverse()
   };
@@ -17907,17 +17612,14 @@ app.post("/api/admin/ai/settings", admin, (req, res) => {
   if (typeof b.primaryModel === "string") {
     secUpdates.geminiModel = resolveGeminiModel(b.primaryModel.trim() || DEFAULT_GEMINI_PRIMARY_MODEL);
   }
-  if (b.secondaryModels !== undefined) {
-    secUpdates.geminiSecondaryModels = parseGeminiSecondaryModels(b.secondaryModels);
+  if (typeof b.workerUrl === "string") {
+    secUpdates.workerUrl = normalizeWorkerUrl(b.workerUrl);
   }
-  if (b.aiLimits && typeof b.aiLimits === "object") {
-    const tier = b.aiLimits.tier === "paid_tier1" || b.aiLimits.tier === "custom" ? b.aiLimits.tier : "free";
-    db.settings.aiLimits = {
-      tier,
-      rpmLimit: Math.max(1, parseInt(b.aiLimits.rpmLimit, 10) || (tier === "paid_tier1" ? 1000 : 5)),
-      tpmLimit: Math.max(1000, parseInt(b.aiLimits.tpmLimit, 10) || (tier === "paid_tier1" ? 4000000 : 250000)),
-      rpdLimit: Math.max(1, parseInt(b.aiLimits.rpdLimit, 10) || (tier === "paid_tier1" ? 10000 : 20))
-    };
+  if (b.clearWorkerSecret) {
+    secUpdates.workerSecret = "";
+  } else if (typeof b.workerSecret === "string") {
+    const ws = b.workerSecret.trim();
+    if (ws && !ws.includes("\u2022")) secUpdates.workerSecret = ws;
   }
   for (const k of ["maxAiCalls", "aiParallel"]) {
     if (b[k] !== void 0 && +b[k] > 0) db.settings[k] = +b[k];
@@ -17931,7 +17633,6 @@ app.post("/api/admin/ai/settings", admin, (req, res) => {
     saveSecretsFile(secUpdates);
   }
   keyCooldown.clear();
-  modelCooldown.clear();
   save();
   if (db.settings.auto) setTimeout(runAutoStartTick, 50);
   res.json(buildAdminAiStatusPayload());
@@ -17940,35 +17641,17 @@ app.post("/api/admin/ai/reset-cooldowns", admin, (req, res) => {
   const keyId = String(req.body?.keyId || "").trim();
   if (!keyId) {
     keyCooldown.clear();
-    modelCooldown.clear();
   } else {
     const match = getGeminiKeysWithMeta().find((k) => k.keyId === keyId);
     if (match) {
       keyCooldown.delete(match.key);
-      for (const mk of [...modelCooldown.keys()]) {
-        if (mk.startsWith(match.key + "|")) modelCooldown.delete(mk);
-      }
     }
   }
   res.json(buildAdminAiStatusPayload());
 });
-app.post("/api/admin/ai/key-model-toggle", admin, (req, res) => {
-  const keyId = String(req.body?.keyId || "").trim();
-  const rawModel = String(req.body?.model || "").trim();
-  const enabled = !!req.body?.enabled;
-  if (!keyId || !rawModel) {
-    return fail(res, "Укажите ключ и модель");
-  }
-  const match = getGeminiKeysWithMeta().find((k) => k.keyId === keyId);
-  if (!match) {
-    return fail(res, "Ключ Gemini не найден");
-  }
-  setKeyModelEnabled(keyId, rawModel, enabled);
-  res.json(buildAdminAiStatusPayload());
-});
 app.post("/api/admin/ai/test-key", admin, async (req, res) => {
   const keyId = String(req.body?.keyId || "").trim();
-  const model = resolveGeminiModel(req.body?.model || getGeminiModelChain()[0] || DEFAULT_GEMINI_PRIMARY_MODEL);
+  const model = resolveGeminiModel(req.body?.model || getGeminiModel());
   const allMeta = getGeminiKeysWithMeta();
   const targets = keyId ? allMeta.filter((k) => k.keyId === keyId) : allMeta;
   if (!targets.length) {
@@ -17983,7 +17666,6 @@ app.post("/api/admin/ai/test-key", admin, async (req, res) => {
       const elapsed = Date.now() - t0;
       const usage = callOpts._lastUsage || {};
       keyCooldown.delete(km.key);
-      modelCooldown.delete(`${km.key}|${model}`);
       recordAiKeyAttempt(km.key, model, { ok: true, ms: elapsed, usage });
       llog({ task: "admin_key_test", p: `gemini(${km.tail})`, model, ok: 1, ms: elapsed, tokens: usage.totalTokens || 0 });
       results.push({ keyId: km.keyId, tail: km.tail, model, ok: true, ms: elapsed, reply: String(reply || "").trim().slice(0, 60), usage });
@@ -17991,8 +17673,9 @@ app.post("/api/admin/ai/test-key", admin, async (req, res) => {
       const elapsed = Date.now() - t0;
       recordAiKeyAttempt(km.key, model, { ok: false, ms: elapsed, errMsg: e?.message || String(e), status: e?.status || 0 });
       llog({ task: "admin_key_test", p: `gemini(${km.tail})`, model, ok: 0, ms: elapsed, err: String(e?.message || e).slice(0, 160) });
-      if (e?.authInvalid || e?.status === 401 || e?.status === 403) coolKey({ key: km.key }, e);
-      else if (e?.status === 429 || e?.status === 404) coolModel({ key: km.key }, model, e);
+      if (e?.authInvalid || e?.status === 401 || e?.status === 403 || e?.status === 429 || e?.status === 404 || e?.status >= 500 || e?.name === "AbortError") {
+        coolKey({ key: km.key }, e);
+      }
       results.push({ keyId: km.keyId, tail: km.tail, model, ok: false, ms: elapsed, status: e?.status || 0, error: String(e?.message || e).slice(0, 180) });
     }
   }
@@ -18013,6 +17696,15 @@ app.post("/api/admin/settings", admin, (req, res) => {
     secUpdates.tgToken = b.tgToken.trim();
     tgCooldownUntil = 0;
     tgLastStatus = { ok: true };
+  }
+  if (typeof b.workerUrl === "string") {
+    secUpdates.workerUrl = normalizeWorkerUrl(b.workerUrl);
+  }
+  if (b.clearWorkerSecret) {
+    secUpdates.workerSecret = "";
+  } else if (typeof b.workerSecret === "string") {
+    const ws = b.workerSecret.trim();
+    if (ws && !ws.includes("\u2022")) secUpdates.workerSecret = ws;
   }
   if (typeof b.adminCode === "string" && b.adminCode.trim() && !process.env.ADMIN_CODE) {
     s.adminCode = b.adminCode.trim();
@@ -18054,11 +17746,7 @@ app.post("/api/admin/settings", admin, (req, res) => {
       secUpdates[MODF[k]] = mv ? (k === "gemini" ? resolveGeminiModel(mv) : mv) : (k === "gemini" ? DEFAULT_GEMINI_PRIMARY_MODEL : "");
     }
   }
-  if (b.geminiSecondaryModels !== undefined) {
-    secUpdates.geminiSecondaryModels = parseGeminiSecondaryModels(b.geminiSecondaryModels);
-  }
   keyCooldown.clear();
-  modelCooldown.clear();
   if (Object.keys(secUpdates).length > 0) {
     saveSecretsFile(secUpdates);
   }
@@ -18068,8 +17756,9 @@ app.post("/api/admin/settings", admin, (req, res) => {
     ok: 1,
     secretsFile: "secrets.json",
     geminiCount: getGeminiKeys().length,
-    geminiModel: HARDCODED.geminiModel,
-    geminiSecondaryModels: HARDCODED.geminiSecondaryModels
+    geminiModel: getGeminiModel(),
+    workerUrl: workerBase(),
+    hasWorkerSecret: !!HARDCODED.workerSecret
   });
 });
 app.post("/api/admin/telegram/test", admin, async (req, res) => {

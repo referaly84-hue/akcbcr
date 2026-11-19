@@ -12668,30 +12668,16 @@ async function pgAdmin(app) {
     await ext.renderAdminAdsTab(ab, ov, re);
   }
   else if (AT === 'ai') {
-    ab.innerHTML = '<div class="panel">Загрузка данных ИИ и лимитов ключей…</div>';
+    ab.innerHTML = '<div class="panel">Загрузка данных ИИ и ключей…</div>';
     const fmtNum = n => Number(n || 0).toLocaleString('ru-RU');
     const fmtTime = ms => ms ? new Date(ms).toLocaleTimeString('ru-RU') : '—';
-    const barColor = pct => pct >= 90 ? '#dc2626' : pct >= 65 ? '#d97706' : '#16a34a';
     const statusBadge = (st, sec) => {
       if (st === 'ready') return '<span class="tag" style="background:#dcfce7;color:#166534;border-color:#86efac;font-weight:700">🟢 Активен</span>';
-      if (st === 'partial') return '<span class="tag" style="background:#fef9c3;color:#854d0e;border-color:#fde047;font-weight:700">🟡 Частично</span>';
-      if (st === 'disabled') return '<span class="tag" style="background:#f1f5f9;color:#475569;border-color:#cbd5e1;font-weight:700">⛔ Отключено</span>';
       if (st === 'cooling') return `<span class="tag" style="background:#fef3c7;color:#92400e;border-color:#fcd34d;font-weight:700">⏳ Пауза 429${sec ? ` (${sec}с)` : ''}</span>`;
       if (st === 'daily_limit') return `<span class="tag" style="background:#ffedd5;color:#9a3412;border-color:#fdba74;font-weight:700">🟠 Дневной лимит${sec ? ` (${Math.ceil(sec / 60)}м)` : ''}</span>`;
       if (st === 'auth_error') return '<span class="tag" style="background:#fee2e2;color:#991b1b;border-color:#fca5a5;font-weight:700">🔴 Ошибка ключа (401/403)</span>';
       return `<span class="tag">${e(st)}</span>`;
     };
-    const renderProgress = (label, used, limit, pct, extra) => `
-      <div style="margin-top:8px">
-        <div class="row sp" style="font-size:12px;margin-bottom:3px">
-          <span style="font-weight:600;color:#334155">${label}</span>
-          <span><b>${fmtNum(used)}</b> / ${fmtNum(limit)} <span class="muted">(${pct}%${extra ? ' · ' + extra : ''})</span></span>
-        </div>
-        <div style="height:7px;background:#e2e8f0;border-radius:999px;overflow:hidden">
-          <div style="height:100%;width:${Math.min(100, Math.max(0, pct))}%;background:${barColor(pct)};transition:width .25s"></div>
-        </div>
-      </div>
-    `;
 
     let lastTestBoxHtml = '';
     const renderAiPanel = async (presetData) => {
@@ -12701,18 +12687,27 @@ async function pgAdmin(app) {
         return;
       }
       const sum = d.summary || {};
-      const lim = d.limitsConfig || {};
+      const cfg = d.appConfig || d.limitsConfig || {};
       const mods = d.models || {};
+      const proxy = d.proxy || {};
       const keys = d.keys || [];
-      const mStats = d.modelStats || [];
+      const presets = Array.isArray(mods.presets) && mods.presets.length
+        ? mods.presets
+        : ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
+      const curModel = mods.primary || 'gemini-3.6-flash';
+      const isPresetModel = presets.includes(curModel);
 
       ab.innerHTML = `
         <div class="panel" style="background:linear-gradient(135deg,#ecfdf5 0%,#f0f9ff 100%);border:1px solid #a7f3d0">
           <div class="row sp" style="flex-wrap:wrap;gap:12px;align-items:flex-start">
             <div style="flex:1;min-width:260px">
-              <h2 style="margin:0 0 6px;color:#065f46">🧠 ИИ: модели, лимиты и квоты ключей</h2>
-              <div class="small" style="color:#047857;line-height:1.45">
-                Основная модель: <b>${e(mods.primary)}</b> · Дополнительные (резерв при 429/ошибке): <b>${(mods.secondary || []).map(e).join(' → ') || '—'}</b>
+              <h2 style="margin:0 0 6px;color:#065f46">🧠 ИИ: модель, ключи и Cloudflare Worker</h2>
+              <div class="small" style="color:#047857;line-height:1.5">
+                Активная модель Gemini: <b><code>${e(curModel)}</code></b> · Балансировка: <b>Round-Robin</b> по всем активным ключам
+                <br>
+                Прокси: ${proxy.active
+                  ? `<span style="color:#065f46;font-weight:700">🟢 Cloudflare Worker</span> (<code>${e(proxy.workerUrl)}</code>${proxy.hasWorkerSecret ? ' · секрет задан' : ''})`
+                  : '<span class="muted">⚪ Напрямую (Cloudflare Worker не задан)</span>'}
               </div>
             </div>
             <div class="row" style="gap:8px;flex-wrap:wrap">
@@ -12728,20 +12723,20 @@ async function pgAdmin(app) {
               <div style="font-size:20px;font-weight:800;color:#065f46;margin:2px 0">${sum.readyKeys || 0} / ${sum.totalKeys || 0} <span style="font-size:12px;font-weight:600">готово</span></div>
               <div class="small muted">На паузе: ${sum.coolingKeys || 0} · Ошибки: ${sum.invalidKeys || 0}</div>
             </div>
-            <div style="background:#fff;border:1px solid #bae6fd;border-radius:8px;padding:10px 12px">
-              <div class="small muted">Нагрузка сейчас (RPM / TPM)</div>
-              <div style="font-size:20px;font-weight:800;color:#0369a1;margin:2px 0">${fmtNum(sum.rpmNow)} <span style="font-size:12px;font-weight:600">/ ${fmtNum(sum.totalRpmLimit)} RPM</span></div>
-              <div class="small muted">${fmtNum(sum.tpmNow)} / ${fmtNum(sum.totalTpmLimit)} TPM</div>
-            </div>
             <div style="background:#fff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 12px">
               <div class="small muted">Запросы за сутки (${e(d.today)})</div>
-              <div style="font-size:20px;font-weight:800;color:#5b21b6;margin:2px 0">${fmtNum(sum.rpdToday)} <span style="font-size:12px;font-weight:600">/ ${fmtNum(sum.totalRpdLimit)} RPD</span></div>
-              <div class="small muted">Успех: ${sum.successRate ?? 100}% · 429: ${sum.rateLimitsToday || 0}</div>
+              <div style="font-size:20px;font-weight:800;color:#5b21b6;margin:2px 0">${fmtNum(sum.rpdToday)}</div>
+              <div class="small muted">Успешно: ${fmtNum(sum.okToday)} · Успех: ${sum.successRate ?? 100}%</div>
+            </div>
+            <div style="background:#fff;border:1px solid #fecaca;border-radius:8px;padding:10px 12px">
+              <div class="small muted">Ошибки и 429 за сутки</div>
+              <div style="font-size:20px;font-weight:800;color:#991b1b;margin:2px 0">${fmtNum(sum.errorsToday)}</div>
+              <div class="small muted">429-лимитов: ${fmtNum(sum.rateLimitsToday)}</div>
             </div>
             <div style="background:#fff;border:1px solid #fde68a;border-radius:8px;padding:10px 12px">
               <div class="small muted">Токены за сутки и скорость</div>
               <div style="font-size:20px;font-weight:800;color:#92400e;margin:2px 0">${fmtNum(sum.tokensToday)}</div>
-              <div class="small muted">Ср. ответ: ${sum.avgMs || 0} мс · Ошибок: ${sum.errorsToday || 0}</div>
+              <div class="small muted">Ср. ответ: ${sum.avgMs || 0} мс</div>
             </div>
           </div>
         </div>
@@ -12749,80 +12744,102 @@ async function pgAdmin(app) {
         <div id="ai_test_results">${lastTestBoxHtml}</div>
 
         <div class="panel">
+          <h3>⚙️ Модель ИИ и Cloudflare Worker</h3>
+          <div class="grid g2">
+            <div>
+              <label>Модель Gemini (одна для всех ключей)</label>
+              <select id="ai_primary_model_sel">
+                ${presets.map(m => `<option value="${e(m)}" ${curModel === m ? 'selected' : ''}>${e(m)}</option>`).join('')}
+                <option value="__custom__" ${!isPresetModel ? 'selected' : ''}>Своя модель…</option>
+              </select>
+              <input id="ai_primary_model" value="${e(curModel)}" placeholder="gemini-3.6-flash" style="margin-top:6px;${isPresetModel ? 'display:none' : ''}">
+              <div class="small muted" style="margin-top:3px">Все ключи Gemini работают на этой выбранной модели по кругу (Round-Robin).</div>
+            </div>
+            <div>
+              <label>URL Cloudflare Worker (прокси)</label>
+              <input id="ai_worker_url" value="${e(proxy.workerUrl || '')}" placeholder="https://my-proxy.workers.dev">
+              <div class="small muted" style="margin-top:3px">Запросы к Gemini (/gemini), Groq (/groq), OpenRouter (/openrouter) и Telegram (/telegram) пойдут через этот Worker.</div>
+            </div>
+          </div>
+
+          <div class="grid g2" style="margin-top:10px">
+            <div>
+              <label>PROXY_SECRET (заголовок <code>x-proxy-secret</code>)</label>
+              <input id="ai_worker_secret" type="password" value="" autocomplete="off" placeholder="${proxy.hasWorkerSecret ? '•••••• (задан, оставьте пустым чтобы не менять)' : 'Введите PROXY_SECRET из настроек Worker'}">
+              ${proxy.hasWorkerSecret ? `<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin-top:4px;font-size:12px"><input type="checkbox" id="ai_clear_worker_secret" style="width:auto"> Очистить PROXY_SECRET</label>` : ''}
+            </div>
+            <div style="display:flex;align-items:flex-end">
+              <div class="small muted" style="line-height:1.45">
+                В Cloudflare Worker: <code>PROXY_SECRET</code> в Variables. Оставьте поле URL пустым, чтобы отправлять запросы напрямую.
+              </div>
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-top:12px">
+            <div>
+              <label>Макс. ИИ-запросов на матч</label>
+              <input id="ai_max_calls" type="number" min="1" value="${cfg.maxAiCalls || 10}">
+            </div>
+            <div>
+              <label>Матчей в ИИ одновременно</label>
+              <input id="ai_parallel" type="number" min="1" value="${cfg.aiParallel || 2}">
+            </div>
+            <div>
+              <label>Запрос за … сек до матча</label>
+              <input id="ai_lead_sec" type="number" min="0" max="900" value="${cfg.aiLeadSec ?? 90}">
+            </div>
+            <div>
+              <label>Запросов на матч (отрезки)</label>
+              <select id="ai_chunks">
+                <option value="2" ${cfg.chunks != 6 ? 'selected' : ''}>2 (по таймам)</option>
+                <option value="6" ${cfg.chunks == 6 ? 'selected' : ''}>6 (по 15 минут)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="row" style="gap:18px;flex-wrap:wrap;margin-top:12px">
+            <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="ai_grounding" ${cfg.grounding ? 'checked' : ''} style="width:auto"> Поиск Google при создании карточек</label>
+            <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="ai_auto" ${cfg.auto ? 'checked' : ''} style="width:auto"> Автозапуск матчей по расписанию</label>
+            <span class="small muted">Лимит вопросов в интервью MOTM: <b>${cfg.interviewLimit || 3}</b> на игрока за матч</span>
+          </div>
+
+          <div style="margin-top:14px">
+            <button type="button" class="btn" id="ai_save_btn">💾 Сохранить настройки ИИ и прокси</button>
+          </div>
+        </div>
+
+        <div class="panel">
           <div class="row sp" style="flex-wrap:wrap;gap:8px;margin-bottom:8px">
-            <h3 style="margin:0">🔑 Лимиты и состояние ключей (${keys.length})</h3>
-            <span class="small muted">Тариф расчёта на ключ: <b>${lim.tier === 'paid_tier1' ? 'Paid Tier 1' : lim.tier === 'custom' ? 'Свой' : 'Free Tier'}</b> (${lim.tier === 'free' ? `Flash: ${fmtNum(lim.rpmLimit)} RPM / ${fmtNum(lim.rpdLimit)} RPD · Flash Lite: 15 RPM / 500 RPD · Всего в цепочке: ${fmtNum(lim.chainRpmLimit || lim.rpmLimit)} RPM · ${fmtNum(lim.chainRpdLimit || lim.rpdLimit)} RPD` : `${fmtNum(lim.rpmLimit)} RPM · ${fmtNum(lim.tpmLimit)} TPM · ${fmtNum(lim.rpdLimit)} RPD`})</span>
+            <h3 style="margin:0">🔑 Ключи Gemini (${keys.length})</h3>
+            ${mods.groq || mods.openrouter ? `<span class="small muted">Внешний резерв: ${mods.groq ? `Groq (<code>${e(mods.groq)}</code>) ` : ''}${mods.openrouter ? `OpenRouter (<code>${e(mods.openrouter)}</code>)` : ''}</span>` : ''}
           </div>
           <p class="small muted" style="margin:0 0 12px;line-height:1.45">
-            Google Gemini API не предоставляет отдельный метод чтения остатка квоты, поэтому здесь в реальном времени считаются фактические запросы (RPM/RPD), токены из <code>usageMetadata</code> (TPM/TPD) и активные 429-таймеры по каждому ключу и каждой модели. При 429 на <code>${e(mods.primary)}</code> запрос автоматически переключается на следующий ключ или резервную модель (<code>${(mods.secondary || []).map(e).join('</code> / <code>')}</code>).
+            Все запросы равномерно распределяются по ключам (Round-Robin) на выбранной модели <code>${e(curModel)}</code>. При 429 или ошибке ключ уходит на паузу и запрос переходит на следующий ключ. Список ключей редактируется во вкладке «⚙️ Настройки».
           </p>
 
-          ${keys.length ? `<div style="display:grid;gap:12px">
+          ${keys.length ? `<div style="display:grid;gap:10px">
             ${keys.map(k => `
-              <div style="border:1px solid var(--line);border-left:4px solid ${k.status === 'ready' ? '#16a34a' : k.status === 'auth_error' ? '#dc2626' : k.status === 'disabled' ? '#94a3b8' : '#d97706'};border-radius:8px;padding:14px;background:#fff">
+              <div style="border:1px solid var(--line);border-left:4px solid ${k.status === 'ready' ? '#16a34a' : k.status === 'auth_error' ? '#dc2626' : '#d97706'};border-radius:8px;padding:12px 14px;background:#fff">
                 <div class="row sp" style="flex-wrap:wrap;gap:8px;align-items:center">
                   <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
                     <b style="font-size:15px">Ключ #${k.index} <code style="background:var(--soft);padding:2px 6px;border-radius:4px">${e(k.tail)}</code></b>
                     <span class="tag">${e(k.source)}</span>
                     ${statusBadge(k.status, k.cooldownRemainingSec)}
-                    ${k.disabledCount ? `<span class="tag" style="background:#f1f5f9;color:#475569;border-color:#cbd5e1">⛔ Отключено моделей: ${k.disabledCount}</span>` : ''}
                   </div>
                   <div class="row" style="gap:6px">
-                    ${k.disabledCount ? `<button type="button" class="btn sm alt" data-ai-toggle-key="${e(k.keyId)}" data-ai-toggle-model="*" data-ai-toggle-next="1">✅ Включить все</button>` : ''}
                     <button type="button" class="btn sm alt" data-ai-test="${e(k.keyId)}">🧪 Тест</button>
                     <button type="button" class="btn sm alt" data-ai-reset="${e(k.keyId)}">🔓 Сброс паузы</button>
                   </div>
                 </div>
 
-                <div class="grid g3" style="gap:12px;margin-top:8px">
-                  <div>${renderProgress('RPM (в минуту)', k.rpmNow, k.rpmLimit || lim.rpmLimit, k.rpmPct, `ост. ${Math.max(0, (k.rpmLimit || lim.rpmLimit) - k.rpmNow)}`)}</div>
-                  <div>${renderProgress('TPM (токенов/мин)', k.tpmNow, k.tpmLimit || lim.tpmLimit, k.tpmPct, '')}</div>
-                  <div>${renderProgress('RPD (за сутки)', k.rpdToday, k.rpdLimit || lim.rpdLimit, k.rpdPct, `ост. ~${Math.max(0, (k.rpdLimit || lim.rpdLimit) - k.rpdToday)}`)}</div>
-                </div>
-
-                <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:#475569">
-                  <span>✅ Успешно: <b>${k.okToday}</b></span>
-                  <span>❌ Ошибок: <b>${k.errorsToday}</b></span>
-                  <span>⚠️ 429-лимитов: <b>${k.rateLimitsToday}</b></span>
-                  <span>🪙 Токены: <b>${fmtNum(k.tokensToday)}</b> (вх: ${fmtNum(k.promptTokensToday)}, вых: ${fmtNum(k.outputTokensToday)}${k.thoughtTokensToday ? `, размышл: ${fmtNum(k.thoughtTokensToday)}` : ''})</span>
+                <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:#475569">
+                  <span>📨 Запросов: <b>${fmtNum(k.rpdToday)}</b></span>
+                  <span>✅ Успешно: <b>${fmtNum(k.okToday)}</b></span>
+                  <span>❌ Ошибок: <b>${fmtNum(k.errorsToday)}</b></span>
+                  <span>⚠️ 429: <b>${fmtNum(k.rateLimitsToday)}</b></span>
+                  <span>🪙 Токены: <b>${fmtNum(k.tokensToday)}</b></span>
                   <span>⚡ Ср. время: <b>${k.avgMs} мс</b></span>
                   <span>🕒 Посл. запрос: <b>${fmtTime(k.lastUsedAt)}</b></span>
-                </div>
-
-                <div class="wrap" style="margin-top:10px">
-                  <table style="font-size:12px">
-                    <thead>
-                      <tr>
-                        <th class="l">Модель</th>
-                        <th class="l">Статус</th>
-                        <th>Управление</th>
-                        <th>RPM</th>
-                        <th>Запросов</th>
-                        <th>429</th>
-                        <th>Токены</th>
-                        <th>Ср. мс</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      ${(k.byModel || []).map(m => `
-                        <tr style="${!m.enabled ? 'opacity:0.65;background:#f8fafc' : ''}">
-                          <td class="l"><code>${e(m.model)}</code> ${m.role === 'primary' ? '<span class="tag" style="font-size:10px">основная</span>' : '<span class="tag" style="font-size:10px;background:#f1f5f9">резерв</span>'}</td>
-                          <td class="l">${statusBadge(m.status, m.cooldownRemainingSec)}</td>
-                          <td>
-                            <div class="row" style="gap:4px;justify-content:center;flex-wrap:nowrap">
-                              <button type="button" class="btn sm alt" data-ai-toggle-key="${e(k.keyId)}" data-ai-toggle-model="${e(m.model)}" data-ai-toggle-next="${m.enabled ? '0' : '1'}" style="min-height:26px;padding:2px 9px;font-size:11px;font-weight:700;${m.enabled ? 'border-color:#86efac;background:#f0fdf4;color:#166534' : 'border-color:#cbd5e1;background:#f1f5f9;color:#475569'}" title="${m.enabled ? 'Отключить эту модель для данного ключа' : 'Включить эту модель для данного ключа'}">${m.enabled ? '🟢 Вкл' : '⛔ Выкл'}</button>
-                              <button type="button" class="btn sm alt" data-ai-test-model="${e(m.model)}" data-ai-test-key="${e(k.keyId)}" style="min-height:26px;padding:2px 7px;font-size:11px" title="Проверить эту модель на данном ключе">🧪</button>
-                            </div>
-                          </td>
-                          <td>${m.rpmNow} / ${m.rpmLimit || lim.rpmLimit}</td>
-                          <td>${m.requestsToday} (ок: ${m.okToday} / ${m.rpdLimit || lim.rpdLimit})</td>
-                          <td>${m.rateLimitsToday}</td>
-                          <td>${fmtNum(m.tokensToday)}</td>
-                          <td>${m.avgMs}</td>
-                        </tr>
-                      `).join('')}
-                    </tbody>
-                  </table>
                 </div>
 
                 ${k.lastError ? `<div class="warn" style="margin-top:8px;padding:7px 10px;font-size:12px"><b>Последняя ошибка (${k.lastErrorStatus || '—'}, ${fmtTime(k.lastErrorAt)}):</b> ${e(k.lastError)}</div>` : ''}
@@ -12830,149 +12847,37 @@ async function pgAdmin(app) {
             `).join('')}
           </div>` : '<div class="empty">Ключи Gemini не найдены. Добавьте ключи во вкладке «Настройки» или через переменную окружения GEMINI_API_KEY.</div>'}
         </div>
-
-        <div class="panel">
-          <h3>📊 Статистика по моделям (за сутки)</h3>
-          <div class="wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th class="l">Модель</th>
-                  <th class="l">Роль</th>
-                  <th>Ключей готово</th>
-                  <th>На паузе</th>
-                  <th>RPM сейчас</th>
-                  <th>Запросов</th>
-                  <th>Успех %</th>
-                  <th>429</th>
-                  <th>Токены</th>
-                  <th>Ср. мс</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${mStats.map(m => `
-                  <tr>
-                    <td class="l"><code>${e(m.model)}</code></td>
-                    <td class="l">${m.role === 'primary' ? '<span class="tag" style="background:#dcfce7;color:#166534">Основная</span>' : '<span class="tag">Дополнительная</span>'}</td>
-                    <td><b>${m.activeKeys}</b>${m.disabledKeys ? ` <span class="small muted">(выкл: ${m.disabledKeys})</span>` : ''}</td>
-                    <td>${m.coolingKeys}</td>
-                    <td>${m.rpmNow} / ${m.totalRpmLimit || (keys.length * (m.rpmLimit || lim.rpmLimit))}</td>
-                    <td>${m.okToday} / ${m.totalRpdLimit || (keys.length * (m.rpdLimit || lim.rpdLimit))} <span class="small muted">(${m.requestsToday})</span></td>
-                    <td>${m.successRate}%</td>
-                    <td>${m.rateLimitsToday}</td>
-                    <td>${fmtNum(m.tokensToday)}</td>
-                    <td>${m.avgMs}</td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>
-          ${mods.groq || mods.openrouter ? `<div class="small muted" style="margin-top:8px">Внешний резерв при исчерпании Gemini: ${mods.groq ? `Groq (<code>${e(mods.groq)}</code>) ` : ''}${mods.openrouter ? `OpenRouter (<code>${e(mods.openrouter)}</code>)` : ''}</div>` : ''}
-        </div>
-
-        <div class="panel">
-          <h3>⚙️ Модели и лимиты приложения</h3>
-          <div class="grid g2">
-            <div>
-              <label>Основная модель Gemini</label>
-              <input id="ai_primary_model" value="${e(mods.primary || 'gemini-3.6-flash')}" placeholder="gemini-3.6-flash">
-              <div class="small muted" style="margin-top:3px">Используется первой для каждого запроса.</div>
-            </div>
-            <div>
-              <label>Дополнительные модели (через запятую)</label>
-              <input id="ai_secondary_models" value="${e((mods.secondary || ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']).join(', '))}" placeholder="gemini-3.5-flash, gemini-3.5-flash-lite, gemini-3.1-flash-lite">
-              <div class="small muted" style="margin-top:3px">Автоматически подхватываются при 429 или ошибке основной модели.</div>
-            </div>
-          </div>
-
-          <div class="grid g4" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-top:12px">
-            <div>
-              <label>Тариф квоты на 1 ключ</label>
-              <select id="ai_tier">
-                <option value="free" ${lim.tier === 'free' ? 'selected' : ''}>Free Tier (Flash: 5 RPM / 20 RPD · Lite: 15 RPM / 500 RPD)</option>
-                <option value="paid_tier1" ${lim.tier === 'paid_tier1' ? 'selected' : ''}>Paid Tier 1 (1000 RPM / 10K RPD)</option>
-                <option value="custom" ${lim.tier === 'custom' ? 'selected' : ''}>Свои лимиты</option>
-              </select>
-            </div>
-            <div>
-              <label>RPM на ключ (Flash)</label>
-              <input id="ai_rpm_limit" type="number" min="1" value="${lim.rpmLimit || 5}">
-            </div>
-            <div>
-              <label>TPM на ключ (ток./мин)</label>
-              <input id="ai_tpm_limit" type="number" min="1000" step="1000" value="${lim.tpmLimit || 250000}">
-            </div>
-            <div>
-              <label>RPD на ключ (Flash)</label>
-              <input id="ai_rpd_limit" type="number" min="1" value="${lim.rpdLimit || 20}">
-            </div>
-          </div>
-
-          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-top:12px">
-            <div>
-              <label>Макс. ИИ-запросов на матч</label>
-              <input id="ai_max_calls" type="number" min="1" value="${lim.maxAiCalls || 10}">
-            </div>
-            <div>
-              <label>Матчей в ИИ одновременно</label>
-              <input id="ai_parallel" type="number" min="1" value="${lim.aiParallel || 2}">
-            </div>
-            <div>
-              <label>Запрос за … сек до матча</label>
-              <input id="ai_lead_sec" type="number" min="0" max="900" value="${lim.aiLeadSec ?? 90}">
-            </div>
-            <div>
-              <label>Запросов на матч (отрезки)</label>
-              <select id="ai_chunks">
-                <option value="2" ${lim.chunks != 6 ? 'selected' : ''}>2 (по таймам)</option>
-                <option value="6" ${lim.chunks == 6 ? 'selected' : ''}>6 (по 15 минут)</option>
-              </select>
-            </div>
-          </div>
-
-          <div class="row" style="gap:18px;flex-wrap:wrap;margin-top:12px">
-            <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="ai_grounding" ${lim.grounding ? 'checked' : ''} style="width:auto"> Поиск Google при создании карточек</label>
-            <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="ai_auto" ${lim.auto ? 'checked' : ''} style="width:auto"> Автозапуск матчей по расписанию</label>
-            <span class="small muted">Лимит вопросов в интервью MOTM: <b>${lim.interviewLimit || 3}</b> на игрока за матч</span>
-          </div>
-
-          <div style="margin-top:14px">
-            <button type="button" class="btn" id="ai_save_btn">💾 Сохранить настройки ИИ и лимитов</button>
-          </div>
-        </div>
       `;
 
       $('#ai_refresh_btn').onclick = () => renderAiPanel();
-      $('#ai_tier').onchange = () => {
-        const v = $('#ai_tier').value;
-        if (v === 'free') {
-          $('#ai_rpm_limit').value = 5;
-          $('#ai_tpm_limit').value = 250000;
-          $('#ai_rpd_limit').value = 20;
-        } else if (v === 'paid_tier1') {
-          $('#ai_rpm_limit').value = 1000;
-          $('#ai_tpm_limit').value = 4000000;
-          $('#ai_rpd_limit').value = 10000;
+      $('#ai_primary_model_sel').onchange = () => {
+        const selVal = $('#ai_primary_model_sel').value;
+        const inp = $('#ai_primary_model');
+        if (selVal === '__custom__') {
+          inp.style.display = '';
+          inp.focus();
+        } else {
+          inp.style.display = 'none';
+          inp.value = selVal;
         }
       };
 
       $('#ai_save_btn').onclick = async () => {
+        const selVal = $('#ai_primary_model_sel').value;
+        const primaryModel = selVal === '__custom__' ? ($('#ai_primary_model').value.trim() || 'gemini-3.6-flash') : selVal;
+        const clearEl = $('#ai_clear_worker_secret');
         const updated = await act(() => api('/admin/ai/settings', {
-          primaryModel: $('#ai_primary_model').value,
-          secondaryModels: $('#ai_secondary_models').value,
-          aiLimits: {
-            tier: $('#ai_tier').value,
-            rpmLimit: +$('#ai_rpm_limit').value,
-            tpmLimit: +$('#ai_tpm_limit').value,
-            rpdLimit: +$('#ai_rpd_limit').value
-          },
+          primaryModel,
+          workerUrl: $('#ai_worker_url').value.trim(),
+          workerSecret: $('#ai_worker_secret').value,
+          clearWorkerSecret: !!(clearEl && clearEl.checked),
           maxAiCalls: +$('#ai_max_calls').value,
           aiParallel: +$('#ai_parallel').value,
           aiLeadSec: +$('#ai_lead_sec').value,
           chunks: +$('#ai_chunks').value,
           grounding: $('#ai_grounding').checked,
           auto: $('#ai_auto').checked
-        }), 'Настройки ИИ и лимитов сохранены');
+        }), 'Настройки ИИ и Cloudflare Worker сохранены');
         if (updated) renderAiPanel(updated);
       };
 
@@ -12988,21 +12893,9 @@ async function pgAdmin(app) {
         };
       });
 
-      ab.querySelectorAll('[data-ai-toggle-key]').forEach(btn => {
-        btn.onclick = async () => {
-          const keyId = btn.dataset.aiToggleKey;
-          const model = btn.dataset.aiToggleModel;
-          const enabled = btn.dataset.aiToggleNext === '1';
-          const msg = model === '*'
-            ? (enabled ? 'Все модели ключа включены' : 'Все модели ключа отключены')
-            : `${model}: ${enabled ? 'включена' : 'отключена'} для ключа`;
-          const updated = await act(() => api('/admin/ai/key-model-toggle', { keyId, model, enabled }), msg);
-          if (updated) renderAiPanel(updated);
-        };
-      });
-
-      const runKeyTest = async (keyId, targetModel) => {
-        const testedModel = targetModel || $('#ai_primary_model')?.value || mods.primary;
+      const runKeyTest = async (keyId) => {
+        const selVal = $('#ai_primary_model_sel')?.value;
+        const testedModel = (selVal === '__custom__' ? $('#ai_primary_model')?.value?.trim() : selVal) || mods.primary;
         const res = await act(() => api('/admin/ai/test-key', { keyId, model: testedModel }));
         if (res && res.results) {
           lastTestBoxHtml = `<div class="panel" style="border-left:4px solid #0284c7;background:#f0f9ff">
@@ -13022,9 +12915,6 @@ async function pgAdmin(app) {
       ab.querySelectorAll('[data-ai-test]').forEach(btn => {
         btn.onclick = () => runKeyTest(btn.dataset.aiTest);
       });
-      ab.querySelectorAll('[data-ai-test-model]').forEach(btn => {
-        btn.onclick = () => runKeyTest(btn.dataset.aiTestKey, btn.dataset.aiTestModel);
-      });
     };
 
     await renderAiPanel();
@@ -13035,14 +12925,15 @@ async function pgAdmin(app) {
       <div class="row sp" style="flex-wrap:wrap;gap:10px">
         <div>
           <h3 style="margin:0 0 4px;color:#166534">📁 Отдельный файл секретов: secrets.json</h3>
-          <p class="small muted" style="margin:0">Все секретные данные (ключи ИИ Gemini, Groq, OpenRouter, модель, токен Telegram-бота и ID канала) сохранены в отдельном файле <code>secrets.json</code> в корне проекта. При сохранении этой вкладки файл автоматически обновляется.</p>
+          <p class="small muted" style="margin:0">Все секретные данные (ключи ИИ Gemini, Groq, OpenRouter, модель, Cloudflare Worker, токен Telegram-бота и ID канала) сохранены в отдельном файле <code>secrets.json</code> в корне проекта. При сохранении этой вкладки файл автоматически обновляется.</p>
         </div>
         <span class="tag" style="background:#dcfce7;color:#166534;border-color:#86efac;font-weight:700">secrets.json активен</span>
       </div>
     </div>
     <div class="panel"><h3>Код администратора</h3><div class="code">${e(s.adminCode)}</div><p class="muted small">Его можно переопределить переменной окружения ADMIN_CODE.</p></div>
-    <div class="panel"><h3>Нейросеть</h3><p class="muted small">Порядок: Gemini (<code>${e((mo.geminiChain || ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']).join(' → '))}</code>) → Groq → OpenRouter. Лимиты и статус ключей доступны во вкладке «🧠 ИИ».</p>
-    ${[['gemini', 'Google Gemini (AI Studio)', 'gemini-3.6-flash'], ['groq', 'Groq', 'openai/gpt-oss-120b'], ['openrouter', 'OpenRouter', 'openrouter/free']].map(([n, t, d]) => `<div class="row" style="margin-top:8px"><div style="flex:1;min-width:230px">${n === 'gemini' ? `<label>${t} ${k.geminiCount ? '<span class="tag">активных ключей: ' + k.geminiCount + (k.geminiFileCount || k.geminiEnvCount ? ` (secrets.json: ${k.geminiFileCount || 0}, env: ${k.geminiEnvCount || 0})` : '') + (k.geminiCooling ? ' (на паузе: ' + k.geminiCooling + ')' : '') + '</span>' : '<span class="tag" style="background:#fef2f2;color:#991b1b;border-color:#fca5a5">ключей нет</span>'}</label><textarea id="k_gemini" rows="5" style="font:13px/1.4 ui-monospace,Consolas,monospace" autocomplete="off" placeholder="${k.geminiCount ? 'Сейчас: ' + (k.geminiTails || []).join(', ') + '. Вставьте любые ключи (по одному в строке, без ограничений — хоть 50 штук). Пусто — не менять.' : 'Вставьте ключи Gemini, по одному в строке (неограниченно: 10, 20, 50+ штук). Будет работать балансировка Round-Robin и мгновенный failover.'}"></textarea><div class="muted small" style="margin-top:3px">✨ Поддерживается любое количество ключей Gemini (до 50+). Запросы равномерно распределяются по кругу (Round-Robin), при ошибке 429 срабатывает переключение на следующий ключ и резервные модели (<code>gemini-3.5-flash</code>, <code>gemini-3.5-flash-lite</code>, <code>gemini-3.1-flash-lite</code>).</div>` : `<label>${t} ${k[n] ? '<span class="tag">ключ есть</span>' : ''}</label><input id="k_${n}" type="password" placeholder="${k[n] ? 'оставьте пустым, чтобы не менять' : 'вставьте ключ'}" autocomplete="off">`}</div><div style="flex:1;min-width:200px"><label>Модель</label><input id="m_${n}" value="${e(mo[n] || '')}" placeholder="${d}"></div></div>`).join('')}
+    <div class="panel"><h3>Нейросеть и Cloudflare Worker</h3><p class="muted small">Активная модель Gemini: <code>${e(mo.gemini || 'gemini-3.6-flash')}</code> → внешний резерв: Groq → OpenRouter. Подробнее во вкладке «🧠 ИИ».</p>
+    ${[['gemini', 'Google Gemini (AI Studio)', 'gemini-3.6-flash'], ['groq', 'Groq', 'openai/gpt-oss-120b'], ['openrouter', 'OpenRouter', 'openrouter/free']].map(([n, t, d]) => `<div class="row" style="margin-top:8px"><div style="flex:1;min-width:230px">${n === 'gemini' ? `<label>${t} ${k.geminiCount ? '<span class="tag">активных ключей: ' + k.geminiCount + (k.geminiFileCount || k.geminiEnvCount ? ` (secrets.json: ${k.geminiFileCount || 0}, env: ${k.geminiEnvCount || 0})` : '') + (k.geminiCooling ? ' (на паузе: ' + k.geminiCooling + ')' : '') + '</span>' : '<span class="tag" style="background:#fef2f2;color:#991b1b;border-color:#fca5a5">ключей нет</span>'}</label><textarea id="k_gemini" rows="5" style="font:13px/1.4 ui-monospace,Consolas,monospace" autocomplete="off" placeholder="${k.geminiCount ? 'Сейчас: ' + (k.geminiTails || []).join(', ') + '. Вставьте любые ключи (по одному в строке, без ограничений — хоть 50 штук). Пусто — не менять.' : 'Вставьте ключи Gemini, по одному в строке (неограниченно: 10, 20, 50+ штук). Будет работать балансировка Round-Robin.'}"></textarea><div class="muted small" style="margin-top:3px">✨ Поддерживается любое количество ключей Gemini (до 50+). Все ключи используют одну выбранную модель по кругу (Round-Robin).</div>` : `<label>${t} ${k[n] ? '<span class="tag">ключ есть</span>' : ''}</label><input id="k_${n}" type="password" placeholder="${k[n] ? 'оставьте пустым, чтобы не менять' : 'вставьте ключ'}" autocomplete="off">`}</div><div style="flex:1;min-width:200px"><label>Модель</label><input id="m_${n}" value="${e(mo[n] || '')}" placeholder="${d}"></div></div>`).join('')}
+    <div class="row" style="margin-top:10px"><div style="flex:1;min-width:230px"><label>URL Cloudflare Worker (прокси)</label><input id="s_worker_url" value="${e(s.workerUrl || '')}" placeholder="https://my-proxy.workers.dev"></div><div style="flex:1;min-width:200px"><label>PROXY_SECRET</label><input id="s_worker_secret" type="password" value="" autocomplete="off" placeholder="${s.hasWorkerSecret ? '•••••• (задан, пусто — не менять)' : 'вставьте PROXY_SECRET'}"></div></div>
     <label style="margin-top:10px"><input type="checkbox" id="gr" ${s.grounding ? 'checked' : ''} style="width:auto"> Поиск Google при создании карточек (только Gemini)</label></div>
     <div class="panel"><h3>Трансляция и Telegram</h3><div class="row"><div style="flex:1;min-width:200px"><label>Секунд реального времени на минуту матча</label><input id="spm" type="number" step="0.5" value="${s.secPerMin}"></div><div style="flex:1;min-width:200px"><label>Пауза на перерыве, сек</label><input id="brk" type="number" value="${s.breakSec}"></div></div>
     <div class="row"><div style="flex:1;min-width:220px"><label>Токен Telegram-бота</label><input id="tgt" type="password" value="${e(s.tgToken)}" placeholder="123456:ABC…"></div><div style="flex:1;min-width:200px"><label>ID канала или чата</label><input id="tgc" value="${e(s.tgChat)}" placeholder="@matchsmotr"></div></div>
@@ -13094,7 +12985,7 @@ async function pgAdmin(app) {
         models[n] = $('#m_' + n).value;
         if (!keys[n]) delete keys[n];
       }
-      await act(() => api('/admin/settings', { keys, models, grounding: $('#gr').checked, secPerMin: $('#spm').value, breakSec: $('#brk').value, tgToken: $('#tgt').value, tgChat: $('#tgc').value, siteUrl: $('#url').value, squadMax: $('#sqm').value, chunks: $('#chk').value, auto: $('#auto').checked, techDefeat: $('#tdef').checked, systemPrompt: $('#sys').value }), 'Настройки сохранены');
+      await act(() => api('/admin/settings', { keys, models, workerUrl: $('#s_worker_url').value.trim(), workerSecret: $('#s_worker_secret').value, grounding: $('#gr').checked, secPerMin: $('#spm').value, breakSec: $('#brk').value, tgToken: $('#tgt').value, tgChat: $('#tgc').value, siteUrl: $('#url').value, squadMax: $('#sqm').value, chunks: $('#chk').value, auto: $('#auto').checked, techDefeat: $('#tdef').checked, systemPrompt: $('#sys').value }), 'Настройки сохранены');
       re();
     };
   }
